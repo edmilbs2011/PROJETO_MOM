@@ -13,7 +13,7 @@ Sistema distribuído de simulação de sensores IoT usando o protocolo **MQTT**.
 
 ---
 
-## Especificações do Projeto
+# Especificações do Projeto
 
 - Instanciar diversos sensores, cada um monitorando **um único parâmetro** (temperatura, umidade ou velocidade); múltiplos sensores do mesmo tipo são suportados com IDs distintos.
 - Permitir **modificar o valor da leitura atual** de cada sensor individualmente (valor fixo) ou deixá-lo gerar leituras aleatórias dentro de uma faixa.
@@ -55,7 +55,7 @@ Sistema distribuído de simulação de sensores IoT usando o protocolo **MQTT**.
 │   gerenciador_app.py    │  QoS 1  │       broker.emqx.io         │  QoS 1  │    cliente_app.py       │
 │                         │ publish │          porta 1883          │subscribe│                         │
 │  Cria/gerencia sensores ├────────►│  <ns>/sensores/config/...    ├────────►│  Mín / Máx / Atual      │
-│  Publica a cada 2 s:    │         │  <ns>/sensores/dados (BATCH) │         │  Alerta ⚠ FORA DA FAIXA │
+│  Publica a cada 5 s:    │         │  <ns>/sensores/dados (BATCH) │         │  Alerta ⚠ FORA DA FAIXA │
 │   • lista de tópicos    │         │                              │         │  Gráfico últimas 10      │
 │   • 1 msg com TODAS as  │         │  <ns> = namespace isolado    │         │  leituras por tipo       │
 │     leituras (batch)    │         │        por usuário+máquina   │         │                         │
@@ -82,7 +82,7 @@ Sistema distribuído de simulação de sensores IoT usando o protocolo **MQTT**.
 
 ### Fluxo de dados
 
-1. **Gerenciador** cria sensores virtuais e chama `GerenciadorSensores.get_dados_transmissao()` a cada 2 s — que devolve `(lista_topicos, {topico: payload})`.
+1. **Gerenciador** cria sensores virtuais e chama `GerenciadorSensores.get_dados_transmissao()` a cada 5 s — que devolve `(lista_topicos, {topico: payload})`.
 2. `Sensor.gerar_leitura()` calcula o valor (aleatório ou fixo) e avalia `alerta = valor < v_min or valor > v_max`.
 3. `MqttGerenciadorController` publica **duas** mensagens QoS 1 retidas: a lista de tópicos em `TOPICO_CONFIG` e **todas as leituras do ciclo em uma única mensagem batch** em `TOPICO_DADOS`.
 4. O **Cliente** faz apenas **2 assinaturas fixas** (`TOPICO_CONFIG` e `TOPICO_DADOS`) — independente do número de sensores.
@@ -115,7 +115,7 @@ PROJETO_MOM/
 | `config.py` | Config | Gera o `NAMESPACE` (slug de usuário+hostname) e os nomes `TOPICO_CONFIG` e `TOPICO_DADOS` |
 | `sensores.py` | Lógica | `Sensor` (estado, geração, detecção de alerta) e `GerenciadorSensores` (CRUD thread-safe) |
 | `gerenciador_app.py` | Interface | Criar/excluir sensores por tipo, editar Mín/Máx/Atual em tempo real; `_SensorUI` sincroniza Tkinter com `Sensor` |
-| `mqtt_gerenciador.py` | Comunicação | Conexão ao broker, thread de transmissão a cada 2 s; publica lista + **batch** QoS 1 |
+| `mqtt_gerenciador.py` | Comunicação | Conexão ao broker, thread de transmissão a cada 5 s; publica lista + **batch** QoS 1 |
 | `cliente_app.py` | Interface | Painel de disponíveis/assinados, labels Mín/Máx/Atual, alertas, gráfico matplotlib por tipo |
 | `mqtt_cliente.py` | Comunicação | 2 assinaturas fixas (config + dados), processa o batch, filtra em Python e entrega à UI |
 
@@ -272,7 +272,7 @@ O Gerenciador publica **todas** as leituras de um ciclo em uma única mensagem J
 
 O Cliente assina apenas `TOPICO_CONFIG` e `TOPICO_DADOS`. Ao receber o batch, **filtra em Python** quais sensores exibir conforme os checkboxes marcados (`_topicos_assinados`). Assim, `assinar()` e `cancelar_assinatura()` apenas adicionam/removem do set local — **nenhuma chamada extra ao broker**.
 
-> **Por que não 1 tópico por sensor?** Era o desenho anterior. Com 30 sensores ele gerava 31 assinaturas e 31 publicações por ciclo, estourando os dois limites acima — exatamente o bug em que umidade e velocidade não chegavam ao cliente.
+> **Por que não 1 tópico por sensor?** Na arquitetura inicial observamos que com 30 sensores ele gerava 31 assinaturas e 31 publicações por ciclo (1 assinatura do TOPICO_CONFIG + 30 assinaturas de TOPICO_DADOS, uma para cada sensor), estourando os dois limites acima — gerando um bug em que umidade e velocidade não chegavam ao cliente.
 
 ### QoS 1 — entrega garantida
 
@@ -372,7 +372,7 @@ Cada payload de leitura (valor do dicionário) tem os campos:
 | Cliente e Gerenciador não se comunicam | Namespaces diferentes | Confira se o `ns:` no título das duas janelas é idêntico |
 | Valores não atualizam no Cliente | Sensor desligado ou checkbox não marcado | Verifique o checkbox "ativo" no Gerenciador e o checkbox no painel esquerdo do Cliente |
 | Alerta não aparece | Sensor em modo aleatório (nunca sai da faixa) | Use valor fixo fora da faixa Mín–Máx |
-| Campo "Atual" não aplica valor fixo | O valor é aplicado a cada keystroke — aguarde o próximo ciclo | Aguarde 2 s após digitar |
+| Campo "Atual" não aplica valor fixo | O valor é aplicado a cada keystroke — aguarde o próximo ciclo | Aguarde 5 segundos após digitar |
 | `ModuleNotFoundError: paho` ou `matplotlib` | venv não ativo ou dependências não instaladas | `source .venv/bin/activate && pip install -r requirements.txt` |
 | `_tkinter.TclError` / janela não abre | tkinter não instalado no sistema | `sudo apt install python3-tk` |
 | Importação falha | Executando fora do diretório `src/` | `cd src && python gerenciador_app.py` |
@@ -389,7 +389,7 @@ Cada payload de leitura (valor do dicionário) tem os campos:
 | QoS 1 pode duplicar | Em redes muito instáveis, a mesma leitura pode ser entregue mais de uma vez |
 | Gráfico de tamanho fixo | O gráfico matplotlib (640×176 px) não redimensiona com a janela |
 | Alerta somente via valor fixo | `random.uniform(v_min, v_max)` nunca gera valores fora da faixa |
-| Latência do batch | Todas as leituras chegam juntas a cada 2 s; não há streaming individual por sensor |
+| Latência do batch | Todas as leituras chegam juntas a cada 5 s; não há streaming individual por sensor |
 
 ---
 
