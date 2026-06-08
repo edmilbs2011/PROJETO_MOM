@@ -1,3 +1,10 @@
+"""
+Camada de comunicação (lado publicador).
+
+Conecta ao broker e, em uma thread própria, publica a cada ciclo: (1) a lista de
+tópicos disponíveis e (2) o batch com todas as leituras. Não conhece sensores nem
+widgets — recebe apenas `get_dados_fn`, mantendo a rede desacoplada do domínio/UI.
+"""
 import json
 import threading
 import time
@@ -6,7 +13,7 @@ from collections.abc import Callable
 from paho.mqtt import client as mqtt_client
 from config import TOPICO_CONFIG, TOPICO_DADOS
 
-_QOS = 1
+_QOS = 1  # QoS 1 = entrega garantida (ao menos uma vez), com retransmissão na reconexão
 
 
 class MqttGerenciadorController:
@@ -19,11 +26,13 @@ class MqttGerenciadorController:
         self._get_dados = get_dados_fn
         self.broker = broker
         self.port = port
+        # Sufixo aleatório evita colisão de client_id no broker público (desconectaria o outro)
         client_id = f"gerenciador_sensores_{uuid.uuid4().hex[:8]}"
         self.client = mqtt_client.Client(mqtt_client.CallbackAPIVersion.VERSION2, client_id)
         self.client.on_connect = self._on_connect
         self.client.on_disconnect = self._on_disconnect
 
+        # Event ligado/desligado pelos callbacks de conexão; pausa a transmissão offline
         self._conectado = threading.Event()
         self._rodando = False
         self._thread = None
@@ -31,10 +40,13 @@ class MqttGerenciadorController:
     def conectar(self):
         try:
             self.client.connect(self.broker, self.port, keepalive=60)
+            # loop_start: thread interna do paho cuida de I/O de rede e reconexão automática
             self.client.loop_start()
         except Exception as e:
+            # Falha inicial não é fatal: o loop_start segue tentando reconectar em background
             print(f"[Gerenciador MQTT] Falha inicial ao conectar: {e}. Tentando reconectar...")
 
+        # Thread separada para publicar sem travar a UI (daemon: morre junto com o app)
         self._rodando = True
         self._thread = threading.Thread(target=self._loop_transmissao, daemon=True)
         self._thread.start()
@@ -54,6 +66,8 @@ class MqttGerenciadorController:
         self._conectado.clear()
 
     def _loop_transmissao(self):
+        """Laço principal de publicação: a cada 5s publica config + batch de dados.
+        Só transmite enquanto `_conectado` está setado (pausa automaticamente offline)."""
         while self._rodando:
             if self._conectado.is_set():
                 try:
@@ -76,9 +90,10 @@ class MqttGerenciadorController:
                     )
                 except Exception as e:
                     print(f"[Gerenciador MQTT] Erro ao transmitir: {e}")
-            time.sleep(5)
+            time.sleep(5)  # intervalo entre ciclos de leitura
 
     def desconectar(self):
+        """Encerramento limpo: para o laço, para o loop de rede e fecha a conexão."""
         self._rodando = False
         self._conectado.clear()
         self.client.loop_stop()

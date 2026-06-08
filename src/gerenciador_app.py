@@ -1,3 +1,10 @@
+"""
+Camada de interface — Gerenciador (publicador).
+
+Janela Tkinter para criar/excluir sensores, ligar/desligar e ajustar faixas.
+Faz a ponte entre os widgets e a camada de domínio (`GerenciadorSensores`), e
+entrega `get_dados_transmissao` ao controller MQTT para a publicação por ciclo.
+"""
 import tkinter as tk
 from tkinter import ttk
 from sensores import GerenciadorSensores, Sensor
@@ -6,7 +13,8 @@ from config import RAIZ, NAMESPACE
 
 
 class _SensorUI:
-    """Tkinter state for one sensor; syncs user inputs back to the domain Sensor."""
+    """Estado Tkinter de um sensor; sincroniza as entradas do usuário de volta para
+    o objeto de domínio `Sensor` via `trace_add` nas variáveis."""
     def __init__(self, sensor: Sensor):
         self.sensor = sensor
         self.var_ativo = tk.BooleanVar(value=sensor.ativo)
@@ -15,8 +23,11 @@ class _SensorUI:
         self.var_max = tk.DoubleVar(value=sensor.v_max)
         self.var_valor_atual = tk.StringVar(value="---")
         self.entry_valor: ttk.Entry | None = None
+        # Flag anti-eco: indica que o código (não o usuário) está alterando o display,
+        # evitando que set_display dispare _sync_valor_atual e grave um "valor fixo"
         self._atualizando_display = False
 
+        # A cada alteração no widget, espelha o valor no objeto de domínio
         self.var_ativo.trace_add("write", lambda *_: setattr(sensor, 'ativo', self.var_ativo.get()))
         self.var_min.trace_add("write", self._sync_min)
         self.var_max.trace_add("write", self._sync_max)
@@ -26,18 +37,20 @@ class _SensorUI:
         try:
             self.sensor.v_min = self.var_min.get()
         except tk.TclError:
-            pass
+            pass  # campo momentaneamente vazio/inválido durante a digitação
 
     def _sync_max(self, *_):
         try:
             self.sensor.v_max = self.var_max.get()
         except tk.TclError:
-            pass
+            pass  # idem _sync_min
 
     def _sync_valor_atual(self, *_):
+        # Ignora alterações vindas do próprio código (refresh periódico do display)
         if self._atualizando_display:
             return
         val_str = self.var_valor_atual.get().strip()
+        # Vazio/placeholder -> volta ao modo aleatório; número -> fixa o valor digitado
         if val_str in ("", "---", "OFF"):
             self.sensor.valor_fixo = None
         else:
@@ -54,17 +67,21 @@ class _SensorUI:
 
 
 class GerenciadorSensoresApp:
+    """Janela principal do Gerenciador: monta a UI, instancia o domínio e o MQTT."""
     def __init__(self, root):
         self.root = root
+        # ns no título permite conferir visualmente que Gerenciador e Cliente batem
         self.root.title(f"Gerenciador MQTT  |  ns: {NAMESPACE}")
         self.root.geometry("800x600")
         self.root.protocol("WM_DELETE_WINDOW", self._fechar)
 
         self._gerenciador = GerenciadorSensores()
-        self._sensores_ui: dict[str, _SensorUI] = {}
-        self._frames_tipo: dict[str, ttk.LabelFrame] = {}
+        self._sensores_ui: dict[str, _SensorUI] = {}      # tópico -> wrapper de UI
+        self._frames_tipo: dict[str, ttk.LabelFrame] = {}  # tipo -> seção na lista
+        # Contador por tipo: gera nomes sequenciais (temperatura_1, _2, ...) sem reusar índices
         self._contadores = {"temperatura": 0, "umidade": 0, "velocidade": 0}
 
+        # Controller recebe só a função de dados — nenhuma referência a sensores/widgets
         self._mqtt = MqttGerenciadorController(
             get_dados_fn=self._gerenciador.get_dados_transmissao
         )
@@ -123,12 +140,14 @@ class GerenciadorSensoresApp:
         scrollbar.pack(side="right", fill="y")
 
     def _agendar_atualizacao_labels(self):
+        """Refresca o campo "Atual" de cada sensor a cada 2s, sem atrapalhar o usuário:
+        pula sensores em valor fixo e o campo que está em edição (com foco)."""
         focused = self.root.focus_get()
         for sui in self._sensores_ui.values():
             if sui.sensor.valor_fixo is not None:
-                continue
+                continue  # valor fixo: não sobrescrever o que o usuário definiu
             if sui.entry_valor is not None and sui.entry_valor == focused:
-                continue
+                continue  # não mexer no campo que o usuário está digitando
             valor = sui.sensor.ultimo_valor
             if not sui.sensor.ativo:
                 sui.set_display("OFF")
@@ -136,14 +155,17 @@ class GerenciadorSensoresApp:
                 sui.set_display("---")
             else:
                 sui.set_display(str(valor))
+        # Reagenda a si mesmo na main thread (loop de atualização da UI)
         self.root.after(2000, self._agendar_atualizacao_labels)
 
     def _criar_n_sensores(self, tipo: str, min_p: float, max_p: float):
+        """Cria N sensores do tipo (N vem do campo de quantidade), renderizando cada um."""
         qtd = self._inputs_quantidade[tipo].get()
         if qtd <= 0:
             return
         for _ in range(qtd):
             self._contadores[tipo] += 1
+            # Tópico = raiz/tipo/tipo_N (ex.: edmil_pc/sensores/temperatura/temperatura_1)
             topico = f"{RAIZ}/{tipo}/{tipo}_{self._contadores[tipo]}"
             sensor = self._gerenciador.criar(topico, tipo, min_p, max_p)
             sui = _SensorUI(sensor)
@@ -151,6 +173,7 @@ class GerenciadorSensoresApp:
             self._renderizar_sensor(sui)
 
     def _excluir_n_sensores(self, tipo: str):
+        """Exclui os N últimos sensores do tipo (domínio + UI) e redesenha a lista."""
         qtd = self._inputs_quantidade[tipo].get()
         if qtd <= 0:
             return
@@ -160,15 +183,18 @@ class GerenciadorSensoresApp:
         self._atualizar_lista_ui()
 
     def _marcar_todos(self, estado: bool):
+        """Marca/desmarca a caixa de seleção de todos os sensores (ação em lote)."""
         for sui in self._sensores_ui.values():
             sui.var_selecionado.set(estado)
 
     def _alterar_status_selecionados(self, ligar: bool):
+        """Liga/desliga apenas os sensores atualmente selecionados."""
         for sui in self._sensores_ui.values():
             if sui.var_selecionado.get():
                 sui.var_ativo.set(ligar)
 
     def _renderizar_sensor(self, sui: _SensorUI):
+        """Desenha a linha de um sensor, agrupando-o no LabelFrame do seu tipo."""
         tipo = sui.sensor.tipo
         if tipo not in self._frames_tipo:
             lf = ttk.LabelFrame(self._scrollable_frame, text=f"  {tipo.capitalize()}  ")
@@ -178,8 +204,8 @@ class GerenciadorSensoresApp:
         frame_item = ttk.Frame(self._frames_tipo[tipo])
         frame_item.pack(fill="x", expand=True, padx=5, pady=2)
 
-        ttk.Checkbutton(frame_item, variable=sui.var_selecionado).grid(row=0, column=0, padx=5)
-        ttk.Checkbutton(frame_item, variable=sui.var_ativo).grid(row=0, column=1, padx=5)
+        ttk.Checkbutton(frame_item, variable=sui.var_selecionado).grid(row=0, column=0, padx=5)  # seleção p/ ações em lote
+        ttk.Checkbutton(frame_item, variable=sui.var_ativo).grid(row=0, column=1, padx=5)        # liga/desliga o sensor
 
         nome_exibicao = sui.sensor.topico.split('/')[-1]
         ttk.Label(frame_item, text=nome_exibicao, width=18, anchor="w").grid(row=0, column=2, padx=5)
@@ -197,6 +223,7 @@ class GerenciadorSensoresApp:
         sui.entry_valor = entry_val
 
     def _atualizar_lista_ui(self):
+        """Redesenho completo: limpa tudo e re-renderiza (usado após exclusões)."""
         for widget in self._scrollable_frame.winfo_children():
             widget.destroy()
         self._frames_tipo.clear()
@@ -207,4 +234,4 @@ class GerenciadorSensoresApp:
 if __name__ == "__main__":
     root = tk.Tk()
     app = GerenciadorSensoresApp(root)
-    root.mainloop()
+    root.mainloop()  # entra no laço de eventos do Tkinter

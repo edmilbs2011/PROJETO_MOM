@@ -1,3 +1,10 @@
+"""
+Camada de comunicação (lado receptor).
+
+Assina os 2 tópicos fixos (config + dados), interpreta as mensagens e repassa o
+resultado à UI por callbacks. A seleção de quais sensores exibir é um filtro local
+(`_topicos_assinados`) — assinar/cancelar na UI não gera tráfego ao broker.
+"""
 import json
 import threading
 import uuid
@@ -5,7 +12,7 @@ from collections.abc import Callable
 from paho.mqtt import client as mqtt_client
 from config import TOPICO_CONFIG as _TOPICO_CONFIG, TOPICO_DADOS as _TOPICO_DADOS, NAMESPACE
 
-_QOS = 1
+_QOS = 1  # mesmo QoS do gerenciador — entrega garantida
 
 
 class MqttClienteController:
@@ -28,11 +35,14 @@ class MqttClienteController:
     ):
         self.broker = broker
         self.port = port
+        # client_id único por instância — vários clientes podem rodar simultaneamente
         self.client_id = f"cliente_{NAMESPACE[:12]}_{uuid.uuid4().hex[:6]}"
 
+        # Callbacks fornecidos pela UI; sempre disparados a partir da thread MQTT
         self._on_lista_recebida = on_lista_recebida_cb
         self._on_sensor_atualizado = on_sensor_atualizado_cb
 
+        # Set de tópicos que o usuário marcou; lido na thread MQTT e escrito na thread da UI
         self._lock = threading.Lock()
         self._topicos_assinados: set[str] = set()
 
@@ -64,6 +74,8 @@ class MqttClienteController:
         print(f"[{self.client_id}] Desconectado (código {rc}). Reconectando...")
 
     def _on_message(self, client, userdata, msg):  # noqa: N803
+        """Roteia cada mensagem conforme o tópico: config -> lista de sensores;
+        dados -> batch de leituras (filtrado pelos sensores marcados na UI)."""
         _ = client, userdata
         try:
             payload_str = msg.payload.decode('utf-8')

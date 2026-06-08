@@ -1,3 +1,10 @@
+"""
+Camada de interface — Cliente (receptor).
+
+Janela Tkinter que lista os sensores anunciados pelo Gerenciador (painel esquerdo),
+permite assinar/cancelar (painel direito) e plota as últimas 10 leituras por tipo.
+Recebe os dados via callbacks do controller MQTT e os aplica sempre na main thread.
+"""
 import threading
 import tkinter as tk
 from tkinter import ttk
@@ -9,20 +16,24 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from mqtt_cliente import MqttClienteController
 from config import NAMESPACE
 
+# Unidade exibida ao lado do valor, por tipo de sensor
 UNIDADES = {
     "temperatura": "°C",
     "umidade":     "%",
     "velocidade":  "Km/h",
 }
 
+# Paleta para distinguir sensores do mesmo tipo no gráfico (ciclada com módulo)
 _CORES = ["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728", "#9467bd",
           "#8c564b", "#e377c2", "#7f7f7f", "#bcbd22", "#17becf"]
 
 
 class ClienteMqttApp:
+    """Janela principal do Cliente: assinaturas, exibição de valores e gráficos."""
     def __init__(self, root):
         self.root = root
 
+        # Os callbacks são chamados pela thread MQTT; os _disparar_* reencaminham à main thread
         self.mqtt_controller = MqttClienteController(
             on_lista_recebida_cb=self._disparar_atualizar_lista,
             on_sensor_atualizado_cb=self._disparar_atualizar_valor,
@@ -33,6 +44,7 @@ class ClienteMqttApp:
         self.root.minsize(750, 420)
         self.root.protocol("WM_DELETE_WINDOW", self._fechar)
 
+        # Flag para descartar callbacks que cheguem após o início do fechamento da janela
         self._fechando = False
 
         # {topico: BooleanVar}
@@ -54,6 +66,8 @@ class ClienteMqttApp:
     # ------------------------------------------------------------------ UI --
 
     def _build_ui(self):
+        """Monta o layout em duas colunas (disponíveis | assinados), cada qual com
+        canvas rolável. As linhas de sensor e gráficos são criados depois, sob demanda."""
         # Painel esquerdo ocupa 1/4, direito 3/4
         self.root.columnconfigure(0, weight=1)
         self.root.columnconfigure(1, weight=3)
@@ -109,15 +123,18 @@ class ClienteMqttApp:
 
     @staticmethod
     def _tipo(topico: str) -> str:
-        # Funciona com e sem namespace: "ns/sensores/tipo/nome" ou "sensores/tipo/nome"
+        """Extrai o tipo do tópico (penúltimo segmento).
+        Funciona com e sem namespace: "ns/sensores/tipo/nome" ou "sensores/tipo/nome"."""
         parts = topico.split('/')
         return parts[-2] if len(parts) >= 3 else "outros"
 
     @staticmethod
     def _nome(topico: str) -> str:
+        """Nome curto do sensor (último segmento do tópico), p/ exibição."""
         return topico.split('/')[-1]
 
     def _cor_sensor(self, topico: str) -> str:
+        """Cor estável para o sensor, conforme sua posição entre os do mesmo tipo."""
         sensores_do_tipo = [t for t in self.historico if self._tipo(t) == self._tipo(topico)]
         idx = sensores_do_tipo.index(topico) if topico in sensores_do_tipo else 0
         return _CORES[idx % len(_CORES)]
@@ -125,9 +142,12 @@ class ClienteMqttApp:
     # ----------------------------------------------- callbacks (main thread) --
 
     def _fechar(self):
+        # Desconecta em thread separada para não travar o fechamento da janela
         self._fechando = True
         self.root.destroy()
         threading.Thread(target=self.mqtt_controller.desconectar, daemon=True).start()
+
+    # `root.after(0, ...)`: agenda a execução na main thread — Tkinter não é thread-safe
 
     def _disparar_atualizar_lista(self, topicos: list[str]):
         if not self._fechando:
@@ -140,6 +160,8 @@ class ClienteMqttApp:
     # -------------------------------------------------- atualização de lista --
 
     def _atualizar_lista(self, topicos: list[str]):
+        """Adiciona ao painel esquerdo apenas os sensores ainda não listados
+        (a mensagem de config é retida e reenviada; só os inéditos geram checkbox)."""
         novos = [t for t in topicos if t not in self.topicos_vars]
         if not novos:
             return
@@ -168,12 +190,15 @@ class ClienteMqttApp:
     # -------------------------------------------------- assinatura / cancel --
 
     def _toggle(self, topico: str):
+        """Reage ao checkbox: marcado -> assina; desmarcado -> cancela."""
         if self.topicos_vars[topico].get():
             self._assinar(topico)
         else:
             self._cancelar(topico)
 
     def _assinar(self, topico: str):
+        """Cria a linha de valores e o gráfico do sensor, e registra o filtro local
+        no controller (o broker não recebe nova assinatura — ver mqtt_cliente)."""
         tipo = self._tipo(topico)
         nome = self._nome(topico)
         unid = UNIDADES.get(tipo, "")
@@ -213,9 +238,11 @@ class ClienteMqttApp:
         lbl_alerta.pack(side="left", padx=(10, 0))
 
         self.valores_rows[topico] = (row, lbl_min, lbl_max, lbl_valor, lbl_alerta)
+        # deque(maxlen=10): mantém só as 10 leituras mais recentes (descarte automático)
         self.historico[topico] = deque(maxlen=10)
         self.historico_alertas[topico] = deque(maxlen=10)
 
+        # Primeiro sensor do tipo cria o gráfico; demais só redesenham o já existente
         if tipo_novo:
             self._criar_grafico(tipo)
         else:
@@ -224,6 +251,8 @@ class ClienteMqttApp:
         self.mqtt_controller.assinar(topico)
 
     def _cancelar(self, topico: str):
+        """Remove a linha e o histórico do sensor; descarta a seção/gráfico do tipo
+        se ele ficou sem sensores. Também remove o filtro local no controller."""
         if topico in self.valores_rows:
             row, *_ = self.valores_rows.pop(topico)
             row.destroy()
@@ -234,7 +263,7 @@ class ClienteMqttApp:
         tipo = self._tipo(topico)
         if tipo in self.frames_dir_tipo:
             lf = self.frames_dir_tipo[tipo]
-            if not lf.winfo_children():
+            if not lf.winfo_children():  # último sensor do tipo: remove seção + gráfico
                 lf.destroy()
                 del self.frames_dir_tipo[tipo]
                 if tipo in self.graficos_tipo:
@@ -248,6 +277,7 @@ class ClienteMqttApp:
     # ----------------------------------------------------------- matplotlib --
 
     def _criar_grafico(self, tipo: str):
+        """Cria uma figura matplotlib embutida no Tkinter para o tipo (eixo fixo 1..10)."""
         frame_grafico = ttk.Frame(self.inner_dir)
         frame_grafico.pack(fill="x", padx=6, pady=(2, 10))
 
@@ -270,13 +300,15 @@ class ClienteMqttApp:
         }
 
     def _atualizar_grafico(self, tipo: str):
+        """Redesenha o gráfico do tipo: uma linha por sensor, com losangos vermelhos
+        nos pontos em alerta (leitura fora da faixa)."""
         if tipo not in self.graficos_tipo:
             return
 
         ax: object = self.graficos_tipo[tipo]['ax']
         canvas = self.graficos_tipo[tipo]['canvas']
 
-        ax.clear()
+        ax.clear()  # replota do zero a cada nova leitura
         ax.set_title(f"Últimas 10 leituras — {tipo.capitalize()}", fontsize=8, pad=4)
         ax.set_xlabel("Leitura", fontsize=7)
         ax.set_ylabel(UNIDADES.get(tipo, ""), fontsize=7)
@@ -297,7 +329,7 @@ class ClienteMqttApp:
 
             ax.plot(xs, ys, linewidth=1.4, color=cor, label=self._nome(topico))
 
-            # Pontos normais
+            # Pontos normais (na cor do sensor)
             xs_ok = [x for x, a in zip(xs, alertas) if not a]
             ys_ok = [y for y, a in zip(ys, alertas) if not a]
             if xs_ok:
@@ -319,10 +351,13 @@ class ClienteMqttApp:
     # -------------------------------------------------- atualização de valor --
 
     def _atualizar_valor(self, topico: str, valor: float, v_min: float, v_max: float, alerta: bool):
+        """Aplica uma nova leitura: atualiza rótulos (valor/min/max/alerta), guarda no
+        histórico e redesenha o gráfico do tipo. Ignora sensores não mais assinados."""
         if topico not in self.valores_rows:
             return
         _, lbl_min, lbl_max, lbl_valor, lbl_alerta = self.valores_rows[topico]
 
+        # winfo_exists() protege contra leitura que chega logo após o widget ser destruído
         cor_atual = "red" if alerta else "black"
         if lbl_valor.winfo_exists():
             lbl_valor.config(text=str(valor), foreground=cor_atual)
@@ -348,4 +383,4 @@ class ClienteMqttApp:
 if __name__ == "__main__":
     root = tk.Tk()
     app = ClienteMqttApp(root)
-    root.mainloop()
+    root.mainloop()  # entra no laço de eventos do Tkinter
