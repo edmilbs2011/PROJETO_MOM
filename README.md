@@ -12,9 +12,7 @@ Sistema distribuído de simulação de sensores IoT usando o protocolo **MQTT**.
 > **Arquitetura de transmissão:** todas as leituras de um ciclo viajam em **uma única mensagem MQTT** (batch) sob um **namespace isolado por máquina/usuário**. Esse desenho contorna os limites do broker público (número de assinaturas e throttling) que faziam sensores de umidade/velocidade não chegarem ao cliente quando havia muitos sensores. Detalhes na seção [Arquitetura de comunicação](#arquitetura-de-comunicação).
 
 
-
-# Especificações do Projeto
-
+# ESPECIFICAÇÃO DO PROJETO
 - Instanciar diversos sensores, cada um monitorando **um único parâmetro** (temperatura, umidade ou velocidade); múltiplos sensores do mesmo tipo são suportados com IDs distintos.
 - Permitir **modificar o valor da leitura atual** de cada sensor individualmente (valor fixo) ou deixá-lo gerar leituras aleatórias dentro de uma faixa.
 - Definir **limites máximo e mínimo** para cada sensor, alteráveis em tempo real.
